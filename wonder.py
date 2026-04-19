@@ -25,7 +25,7 @@ SYSTEM_PROMPT = (
     "process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., "
     "<think> reasoning process here </think><answer> answer here </answer>"
 )
-TRAINED_MODEL_PATH = "data/Qwen-GRPO-training"
+TRAINED_MODEL_PATH = "data/trained_model"  # Path to save the trained model and tokenizer
 
 # Initialize base model
 # Check CUDA availability
@@ -418,13 +418,7 @@ class ModelConfig:
     model_revision: Optional[str] = field(
         default="main", metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."}
     )
-    torch_dtype: Optional[str] = field(
-        default="bfloat16", metadata={"help": "Override the default `torch_dtype` and load the model under this dtype."}
-    )
     trust_remote_code: bool = field(
         default=True, metadata={"help": "Trust remote code when loading model and tokenizer."}
-    )
-    attn_implementation: Optional[str] = field(
-        default="flash_attention_2", metadata={"help": "Attention implementation to use. 'flash_attention_2' or None"}
     )
 

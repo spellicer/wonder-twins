@@ -3,7 +3,6 @@ import logging
 import os
 from dataclasses import dataclass, field
 # Import PyTorch and Hugging Face Transformers
-import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
 from transformers.trainer_utils import get_last_checkpoint
 
@@ -14,10 +13,11 @@ from datasets import load_dataset
 from trl.trainer.grpo_trainer import GRPOTrainer
 from trl.trainer.grpo_config import GRPOConfig
 
-from wonder import TRAINED_MODEL_PATH, GRPOScriptArguments, ModelConfig, device, device_map, get_callbacks, get_reward_functions, load_math_dataset, test_model_inference, validate_dataset
+from wonder import TRAINED_MODEL_PATH, GRPOScriptArguments, ModelConfig, device, get_callbacks, get_reward_functions, load_math_dataset, test_model_inference, validate_dataset
 
 # Define the path to your trained model (same as OUTPUT_DIR)
-MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+#MODEL_NAME = "deepseek-ai/DeepSeek-V3"  # Base model name (can be a local path or Hugging Face Hub model ID)
+MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"# Base model name (can be a local path or Hugging Face Hub model ID)
 
 # Load the "AI-MO/NuminaMath-TIR" dataset from DigitalLearningGmbH
 MATH_le = load_dataset("AI-MO/NuminaMath-TIR", "default")  
@@ -51,9 +51,7 @@ print(f"EOS token: {tokenizer.eos_token}")
 
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
-    trust_remote_code=True,
-    dtype=torch.bfloat16,
-    device_map=device_map
+    trust_remote_code=True
 )
 
 print(f"Model parameters: {model.num_parameters():,}")
@@ -78,7 +76,7 @@ training_args = TrainingArguments(
     per_device_eval_batch_size=16, # Batch size for evaluation
     gradient_accumulation_steps=2, # Accumulate gradients to simulate larger batch size
     learning_rate=5e-5,            # Initial learning rate for AdamW optimizer
-    warmup_steps=0.1,              # Linear warmup over warmup_ratio fraction of training steps
+    warmup_ratio=0.1,              # Linear warmup over warmup_ratio fraction of training steps
     weight_decay=0.01,             # Apply weight decay to all layers except bias and LayerNorm weights
     logging_steps=10,              # Log every X updates steps
     eval_strategy="steps",         # Evaluate every `eval_steps`
@@ -92,11 +90,16 @@ training_args = TrainingArguments(
     gradient_checkpointing=True,   # Enable gradient checkpointing
     report_to="none",              # Reporting to no one
     remove_unused_columns=False,   # Do not remove unused columns from the dataset
+    bf16=True,                      # Use mixed precision (if supported by the hardware
+    use_cpu=True,                    # Use GPU if available
+    no_cuda=True,                 # Disable CUDA (force CPU usage, set to True for testing on CPU
 )
 # Instantiate configuration objects
 script_args = GRPOScriptArguments()
 model_args = ModelConfig(MODEL_NAME)
 logger = logging.getLogger(__name__)
+logging.basicConfig() # Ensure at least one handler exists
+logging.getLogger().setLevel(logging.INFO)
 
 # Get reward functions and callbacks
 reward_functions = get_reward_functions(script_args)

@@ -1,21 +1,18 @@
 # Import necessary libraries
 import logging
 import os
-import sys
 import re
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
+import typing
 
 # Import PyTorch and Hugging Face Transformers
 import torch
-import transformers
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    HfArgumentParser,
     TrainingArguments,
-    set_seed,
     TrainerCallback,
     TrainerControl,
     TrainerState,
@@ -23,72 +20,19 @@ from transformers import (
 from transformers.trainer_utils import get_last_checkpoint
 
 # Import dataset utilities
-import datasets
-from datasets import load_dataset
+from datasets import DatasetDict, load_dataset
 
 # Import libraries from TRL (Transformers Reinforcement Learning)
-from trl.experimental.ppo import (
-    AutoModelForCausalLMWithValueHead, 
-    PPOConfig, 
-    PPOTrainer, 
-)
-from trl import (
-    GRPOTrainer, 
-    GRPOConfig, 
-    SFTTrainer
-)
+from trl.trainer.grpo_trainer import GRPOTrainer
+from trl.trainer.grpo_config import GRPOConfig
+from trl.trainer.sft_trainer import SFTTrainer
 
 # Import math-related utilities
 from latex2sympy2_extended import NormalizationConfig
 from math_verify import LatexExtractionConfig, parse, verify
-# Load the "AI-MO/NuminaMath-TIR" dataset from DigitalLearningGmbH
-MATH_le = load_dataset("AI-MO/NuminaMath-TIR", "default")  
-
-# Access the first sample in the training set
-MATH_le['train'][0]
-# Load the "Bespoke-Stratos-17k" dataset from bespokelabs
-bespoke_rl = load_dataset("bespokelabs/Bespoke-Stratos-17k", "default") 
-
-# Access the first sample in the training set
-bespoke_rl['train'][0]
-MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
-OUTPUT_DIR = "data/Qwen-GRPO-training" # For saving our trained model
-
-# Create output directory if it doesn't exist
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# Initialize tokenizer with chat template
-tokenizer = AutoTokenizer.from_pretrained(
-    MODEL_NAME,
-    trust_remote_code=True,
-    padding_side="right"
-)
-
-# Set pad token if not set
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-
-print(f"Vocabulary size: {len(tokenizer)}")
-print(f"Model max length: {tokenizer.model_max_length}")
-print(f"Pad token: {tokenizer.pad_token}")
-print(f"EOS token: {tokenizer.eos_token}")
-# Initialize base model
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_NAME,
-    trust_remote_code=True,
-    dtype=torch.bfloat16
-)
-
-print(f"Model parameters: {model.num_parameters():,}")
-# Check CUDA availability
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-
-# Move model to the appropriate device
-model.to(device)
 
 # Test basic inference
-def test_model_inference(user_input: str):
+def test_model_inference(model, tokenizer, device, user_input: str):
     """Test basic model inference with the loaded model and tokenizer."""
     messages = [
         {"role": "system", "content": "You are Qwen, a helpful assistant."},
@@ -113,19 +57,6 @@ def test_model_inference(user_input: str):
 
     response = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return response
-
-# Test the model
-test_input = "how are you?"
-response = test_model_inference(test_input)
-print(f"Test Input: {test_input}")
-print(f"Model Response: {response}")
-# DeepSeek system prompt for GRPO based training
-SYSTEM_PROMPT = (
-    "A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant "
-    "first thinks about the reasoning process in the mind and then provides the user with the answer. The reasoning "
-    "process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., "
-    "<think> reasoning process here </think><answer> answer here </answer>"
-)
 # Function to structure the training data
 def make_conversation(example):
     """Convert dataset examples into conversation format."""
@@ -138,16 +69,16 @@ def make_conversation(example):
 # Load and prepare dataset
 def load_math_dataset():
     """Load and prepare the mathematics dataset."""
-    dataset = load_dataset(
+    split_dataset: DatasetDict = typing.cast(DatasetDict, load_dataset(
         "AI-MO/NuminaMath-TIR",
         name="default",
         split=['train', 'test']
-    )
+    ))
     
     # Convert splits into dictionary
     dataset = {
-        'train': dataset[0],
-        'test': dataset[1]
+        'train': split_dataset[0],
+        'test': split_dataset[1]
     }
     
     # Apply conversation format
@@ -159,11 +90,6 @@ def load_math_dataset():
             dataset[split] = dataset[split].remove_columns("messages")
     
     return dataset
-# Load our training dataset and printing train/test size
-dataset = load_math_dataset()
-
-print(f"Train set size: {len(dataset['train'])}")
-print(f"Test set size: {len(dataset['test'])}")
 def validate_dataset(dataset):
     """Perform basic validation checks on the dataset."""
     
@@ -200,9 +126,6 @@ def validate_dataset(dataset):
             print("✓ Prompt format is correct")  # Confirm correct format
         else:
             print("Warning: Incorrect prompt format")  # Warn if format is incorrect
-
-# Validate dataset
-validate_dataset(dataset)
 def accuracy_reward(completions, **kwargs):
     """
     Reward function to check if the model's response is mathematically 
@@ -214,7 +137,7 @@ def accuracy_reward(completions, **kwargs):
     contents = [completion[0]["content"] for completion in completions]
     rewards = []
 
-    solutions = kwargs.get("solution") # Get solutions from kwargs
+    solutions = typing.cast(list,kwargs.get("solution")) # Get solutions from kwargs
     
     for content, sol in zip(contents, solutions):
         # Parse the ground truth solution
@@ -339,7 +262,7 @@ def get_repetition_penalty_reward(ngram_size: int = 3, max_penalty: float = -0.1
         words = text.lower().split() # Lowercase and split into words
         return zip(*[words[i:] for i in range(ngram_size)]) # Create n-grams
 
-    def repetition_penalty_reward(completions, **kwargs) -> float:
+    def repetition_penalty_reward(completions, **kwargs) -> list[float]:
         """
         Repetition penalty reward function.
         """
@@ -365,6 +288,82 @@ def get_repetition_penalty_reward(ngram_size: int = 3, max_penalty: float = -0.1
             rewards.append(reward)
         return rewards
     return repetition_penalty_reward
+# Utility function to get reward functions based on script arguments
+def get_reward_functions(script_args):
+    """
+    Returns a list of reward functions based on the script arguments.
+    """
+    reward_funcs_list = []
+    reward_funcs_registry = {
+        "accuracy": accuracy_reward,  # Assuming accuracy_reward is defined in previous steps
+        "format": format_reward,      # Assuming format_reward is defined in previous steps
+        "reasoning_steps": reasoning_steps_reward, # Assuming reasoning_steps_reward is defined
+        "cosine": get_cosine_scaled_reward( # Assuming get_cosine_scaled_reward is defined
+            min_value_wrong=script_args.cosine_min_value_wrong,
+            max_value_wrong=script_args.cosine_max_value_wrong,
+            min_value_correct=script_args.cosine_min_value_correct,
+            max_value_correct=script_args.cosine_max_value_correct,
+            max_len=script_args.cosine_max_len,
+        ),
+        "repetition_penalty": get_repetition_penalty_reward( # Assuming get_repetition_penalty_reward is defined
+            ngram_size=script_args.repetition_n_grams,
+            max_penalty=script_args.repetition_max_penalty,
+        ),
+    }
+
+    for func_name in script_args.reward_funcs:
+        if func_name not in reward_funcs_registry:
+            raise ValueError(f"Reward function '{func_name}' not found in registry.")
+        reward_funcs_list.append(reward_funcs_registry[func_name])
+
+    return reward_funcs_list
+class LoggingCallback(TrainerCallback):
+    """
+    A simple callback for logging training information at specific steps.
+    """
+    def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        if state.global_step % args.logging_steps == 0:
+            if state.log_history and len(state.log_history) > 0:
+                logger.info(f"Step {state.global_step}: Loss = {state.log_history[-1].get('loss', None)}, Learning Rate = {state.log_history[-1].get('learning_rate', None)}")
+            else:
+                logger.info(f"Step {state.global_step}: No logging information available yet")
+
+def get_callbacks(training_args, model_args, script_args):
+    """
+    Returns a list of callbacks to be used during training.
+    For now, it includes only the LoggingCallback. You can extend this to add more callbacks.
+    """
+    callbacks: list[TrainerCallback] = [LoggingCallback()] # Instantiate our LoggingCallback
+    return callbacks
+# Testing Inference with the Trained Model
+def test_trained_model_inference(trained_model, tokenizer, device, user_input: str):
+    """Test inference with the loaded trained model and tokenizer."""
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT}, # Re-use our system prompt
+        {"role": "user", "content": user_input}
+    ]
+
+    # Apply chat template using our tokenizer
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+
+    # Tokenize the input text
+    inputs = tokenizer(text, return_tensors="pt").to(device)
+
+    # Generate output using our *trained_model*
+    outputs = trained_model.generate(
+        **inputs,
+        max_new_tokens=200, # Maybe generate a bit longer now
+        do_sample=True,
+        temperature=0.7
+    )
+
+    # Decode the generated tokens back to text
+    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return response
 # Define GRPOScriptArguments for reward function parameters
 @dataclass
 class GRPOScriptArguments:
@@ -407,6 +406,92 @@ class GRPOScriptArguments:
         default=-0.1,
         metadata={"help": "Maximum (negative) penalty for for repetition penalty reward"},
     )
+@dataclass
+class ModelConfig:
+    """
+    Configuration for the model.
+    """
+    model_name_or_path: str = field(
+        metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
+    )
+    model_revision: Optional[str] = field(
+        default="main", metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."}
+    )
+    torch_dtype: Optional[str] = field(
+        default="bfloat16", metadata={"help": "Override the default `torch_dtype` and load the model under this dtype."}
+    )
+    trust_remote_code: bool = field(
+        default=True, metadata={"help": "Trust remote code when loading model and tokenizer."}
+    )
+    attn_implementation: Optional[str] = field(
+        default="flash_attention_2", metadata={"help": "Attention implementation to use. 'flash_attention_2' or None"}
+    )
+
+# Load the "AI-MO/NuminaMath-TIR" dataset from DigitalLearningGmbH
+MATH_le = load_dataset("AI-MO/NuminaMath-TIR", "default")  
+
+# Access the first sample in the training set
+MATH_le['train'][0]
+# Load the "Bespoke-Stratos-17k" dataset from bespokelabs
+bespoke_rl = load_dataset("bespokelabs/Bespoke-Stratos-17k", "default") 
+
+# Access the first sample in the training set
+bespoke_rl['train'][0]
+MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+OUTPUT_DIR = "data/Qwen-GRPO-training" # For saving our trained model
+
+# Create output directory if it doesn't exist
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Initialize tokenizer with chat template
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_NAME,
+    trust_remote_code=True,
+    padding_side="right"
+)
+
+# Set pad token if not set
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+print(f"Vocabulary size: {len(tokenizer)}")
+print(f"Model max length: {tokenizer.model_max_length}")
+print(f"Pad token: {tokenizer.pad_token}")
+print(f"EOS token: {tokenizer.eos_token}")
+# Initialize base model
+# Check CUDA availability
+device_map = "cuda" if torch.cuda.is_available() else "cpu"
+device = torch.device(device_map)
+print(f"Using device: {device_map}")
+
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_NAME,
+    trust_remote_code=True,
+    dtype=torch.bfloat16,
+    device_map=device_map
+)
+
+print(f"Model parameters: {model.num_parameters():,}")
+
+# Test the model
+test_input = "how are you?"
+response = test_model_inference(model, tokenizer, device, test_input)
+print(f"Test Input: {test_input}")
+print(f"Model Response: {response}")
+# DeepSeek system prompt for GRPO based training
+SYSTEM_PROMPT = (
+    "A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant "
+    "first thinks about the reasoning process in the mind and then provides the user with the answer. The reasoning "
+    "process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., "
+    "<think> reasoning process here </think><answer> answer here </answer>"
+)
+# Load our training dataset and printing train/test size
+dataset = load_math_dataset()
+
+print(f"Train set size: {len(dataset['train'])}")
+print(f"Test set size: {len(dataset['test'])}")
+# Validate dataset
+validate_dataset(dataset)
 # Define TrainingArguments from transformers
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,         # Output directory for checkpoints and logs
@@ -430,78 +515,11 @@ training_args = TrainingArguments(
     report_to="none",              # Reporting to no one
     remove_unused_columns=False,   # Do not remove unused columns from the dataset
 )
-@dataclass
-class ModelConfig:
-    """
-    Configuration for the model.
-    """
-    model_name_or_path: str = field(
-        default=MODEL_NAME, metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
-    )
-    model_revision: Optional[str] = field(
-        default="main", metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."}
-    )
-    torch_dtype: Optional[str] = field(
-        default="bfloat16", metadata={"help": "Override the default `torch_dtype` and load the model under this dtype."}
-    )
-    trust_remote_code: bool = field(
-        default=True, metadata={"help": "Trust remote code when loading model and tokenizer."}
-    )
-    attn_implementation: Optional[str] = field(
-        default="flash_attention_2", metadata={"help": "Attention implementation to use. 'flash_attention_2' or None"}
-    )
 # Instantiate configuration objects
 script_args = GRPOScriptArguments()
-model_args = ModelConfig()
-# Utility function to get reward functions based on script arguments
-def get_reward_functions(script_args):
-    """
-    Returns a list of reward functions based on the script arguments.
-    """
-    reward_funcs_list = []
-    reward_funcs_registry = {
-        "accuracy": accuracy_reward,  # Assuming accuracy_reward is defined in previous steps
-        "format": format_reward,      # Assuming format_reward is defined in previous steps
-        "reasoning_steps": reasoning_steps_reward, # Assuming reasoning_steps_reward is defined
-        "cosine": get_cosine_scaled_reward( # Assuming get_cosine_scaled_reward is defined
-            min_value_wrong=script_args.cosine_min_value_wrong,
-            max_value_wrong=script_args.cosine_max_value_wrong,
-            min_value_correct=script_args.cosine_min_value_correct,
-            max_value_correct=script_args.cosine_max_value_correct,
-            max_len=script_args.cosine_max_len,
-        ),
-        "repetition_penalty": get_repetition_penalty_reward( # Assuming get_repetition_penalty_reward is defined
-            ngram_size=script_args.repetition_n_grams,
-            max_penalty=script_args.repetition_max_penalty,
-        ),
-    }
-
-    for func_name in script_args.reward_funcs:
-        if func_name not in reward_funcs_registry:
-            raise ValueError(f"Reward function '{func_name}' not found in registry.")
-        reward_funcs_list.append(reward_funcs_registry[func_name])
-
-    return reward_funcs_list
+model_args = ModelConfig(MODEL_NAME)
 logger = logging.getLogger(__name__)
 
-class LoggingCallback(TrainerCallback):
-    """
-    A simple callback for logging training information at specific steps.
-    """
-    def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
-        if state.global_step % args.logging_steps == 0:
-            if state.log_history and len(state.log_history) > 0:
-                logger.info(f"Step {state.global_step}: Loss = {state.log_history[-1].get('loss', None)}, Learning Rate = {state.log_history[-1].get('learning_rate', None)}")
-            else:
-                logger.info(f"Step {state.global_step}: No logging information available yet")
-
-def get_callbacks(training_args, model_args, script_args):
-    """
-    Returns a list of callbacks to be used during training.
-    For now, it includes only the LoggingCallback. You can extend this to add more callbacks.
-    """
-    callbacks = [LoggingCallback()] # Instantiate our LoggingCallback
-    return callbacks
 # Get reward functions and callbacks
 reward_functions = get_reward_functions(script_args)
 callbacks = get_callbacks(training_args, model_args, script_args)
@@ -534,6 +552,7 @@ tokenizer.save_pretrained(TRAINED_MODEL_PATH)
 grpo_trainer.save_model(TRAINED_MODEL_PATH)
 
 print(f"GRPO Trained model saved to {TRAINED_MODEL_PATH}")
+
 # Load the tokenizer - make sure to use trust_remote_code=True if needed
 tokenizer = AutoTokenizer.from_pretrained(
     TRAINED_MODEL_PATH,
@@ -549,44 +568,13 @@ if tokenizer.pad_token is None:
 trained_model = AutoModelForCausalLM.from_pretrained(
     TRAINED_MODEL_PATH,
     trust_remote_code=True, # If your model architecture requires it
-    torch_dtype=torch.bfloat16 # Keep the same dtype as training for consistency
+    torch_dtype=torch.bfloat16, # Keep the same dtype as training for consistency
+    device_map=device_map
 )
-
-# Move the loaded model to your device (GPU if available)
-trained_model.to(device) # 'device' is still our CUDA device from before
-# Testing Inference with the Trained Model
-def test_trained_model_inference(user_input: str):
-    """Test inference with the loaded trained model and tokenizer."""
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT}, # Re-use our system prompt
-        {"role": "user", "content": user_input}
-    ]
-
-    # Apply chat template using our tokenizer
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
-    )
-
-    # Tokenize the input text
-    inputs = tokenizer(text, return_tensors="pt").to(device)
-
-    # Generate output using our *trained_model*
-    outputs = trained_model.generate(
-        **inputs,
-        max_new_tokens=200, # Maybe generate a bit longer now
-        do_sample=True,
-        temperature=0.7
-    )
-
-    # Decode the generated tokens back to text
-    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return response
 
 # Test the model
 test_input = "how are you?"
-response = test_trained_model_inference(test_input)
+response = test_trained_model_inference(trained_model, tokenizer, device, test_input)
 print(f"Test Input: {test_input}")
 print(f"Trained Model Response: {response}")
 # Load the "Bespoke-Stratos-17k" dataset from bespokelabs
@@ -602,7 +590,6 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # Training Arguments - similar to GRPO, but adjust for SFT
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    overwrite_output_dir=True,
     num_train_epochs=1,         # Adjust epochs as needed
     per_device_train_batch_size=8,
     per_device_eval_batch_size=16,
@@ -611,7 +598,7 @@ training_args = TrainingArguments(
     warmup_ratio=0.1,
     weight_decay=0.01,
     logging_steps=10,
-    evaluation_strategy="no",
+    eval_strategy="no",
     eval_steps=50,
     save_strategy="steps",
     save_steps=50,
@@ -654,7 +641,7 @@ model_sft = AutoModelForCausalLM.from_pretrained(
 sft_trainer = SFTTrainer(
     model=model_sft,                     # Our initialized Qwen model
     train_dataset=dataset_sft,           # Bespoke-Stratos-17k dataset
-    tokenizer=tokenizer,                 # Tokenizer
+    processing_class=tokenizer,                 # Tokenizer
     args=training_args,                  # Training arguments
 )
 

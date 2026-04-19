@@ -1,4 +1,4 @@
---extra-index-url https://download.pytorch.org/whl/cu118
+--extra-index-url https://wheels.vllm.ai/nightly/cpu --index-strategy first-index --torch-backend cpu
 torch
 torchvision
 torchaudio
@@ -11,3 +11,6 @@ wandb
 vllm
 latex2sympy2_extended
 math_verify
+numpy
+ipykernel
+ipywidgets

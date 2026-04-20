@@ -1,16 +1,10 @@
---extra-index-url https://wheels.vllm.ai/nightly/cpu --index-strategy first-index --torch-backend cpu
 torch
-torchvision
-torchaudio
 transformers
+trl
 datasets
 accelerate
-peft
-trl
-wandb
-vllm==0.17.1
+evaluate
 latex2sympy2_extended
 math_verify
-numpy
 ipykernel
 ipywidgets

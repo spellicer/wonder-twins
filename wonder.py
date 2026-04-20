@@ -421,4 +421,7 @@ class ModelConfig:
     trust_remote_code: bool = field(
         default=True, metadata={"help": "Trust remote code when loading model and tokenizer."}
     )
+    dtype: torch.dtype = field(
+        default=torch.float16, metadata={"help": "Data type for the model."}
+    )
 
